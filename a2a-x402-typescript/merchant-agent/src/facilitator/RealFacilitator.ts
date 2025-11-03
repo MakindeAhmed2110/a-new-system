@@ -40,10 +40,14 @@ export class RealFacilitator implements FacilitatorClient {
 
   constructor() {
     // Get RPC URL from environment or use default Base Sepolia RPC
-    const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL ||
-                   'https://base-sepolia.g.alchemy.com/v2/_sTLFEOJwL7dFs2bLmqUo';
+    const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL
 
-    this.provider = new ethers.JsonRpcProvider(rpcUrl);
+    // Explicitly set Base Sepolia network to avoid auto-detection failures
+    const baseSepoliaNetwork = {
+      name: "base-sepolia",
+      chainId: 84532,
+    };
+    this.provider = new ethers.JsonRpcProvider(rpcUrl, baseSepoliaNetwork, { staticNetwork: true });
 
     // Get merchant private key from environment
     const merchantPrivateKey = process.env.MERCHANT_PRIVATE_KEY;

@@ -31,10 +31,30 @@ import {
 // Import directly from the compiled files, bypassing package.json exports
 // to avoid path resolution issues in Docker
 const path = require('path');
-const { Runner } = require(path.resolve('/node_modules/adk-typescript/dist/runners'));
-const { InMemorySessionService } = require(path.resolve('/node_modules/adk-typescript/dist/sessions'));
-const { InMemoryArtifactService } = require(path.resolve('/node_modules/adk-typescript/dist/artifacts'));
-const { InMemoryMemoryService } = require(path.resolve('/node_modules/adk-typescript/dist/memory'));
+
+// Resolve adk-typescript package path (works in both local dev and Docker)
+function resolveAdkTypeScriptPath(subPath: string): string {
+  // First try: resolve using require.resolve (works with installed packages)
+  try {
+    // Try to resolve the dist file directly
+    const resolved = require.resolve(`adk-typescript/dist/${subPath}`);
+    return resolved;
+  } catch (e) {
+    // Fallback 1: Try local node_modules
+    const localPath = path.join(__dirname, 'node_modules', 'adk-typescript', 'dist', subPath);
+    const fs = require('fs');
+    if (fs.existsSync(localPath)) {
+      return localPath;
+    }
+    // Fallback 2: Docker path (absolute /node_modules)
+    return path.join('/node_modules/adk-typescript/dist', subPath);
+  }
+}
+
+const { Runner } = require(resolveAdkTypeScriptPath('runners'));
+const { InMemorySessionService } = require(resolveAdkTypeScriptPath('sessions'));
+const { InMemoryArtifactService } = require(resolveAdkTypeScriptPath('artifacts'));
+const { InMemoryMemoryService } = require(resolveAdkTypeScriptPath('memory'));
 
 const PORT = process.env.PORT || 10000;
 const utils = new x402Utils();

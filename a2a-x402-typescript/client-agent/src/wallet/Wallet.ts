@@ -56,10 +56,13 @@ export class LocalWallet extends Wallet {
 
     // Get RPC URL from parameter or environment
     const url = rpcUrl ||
-                process.env.BASE_SEPOLIA_RPC_URL ||
-                'https://base-sepolia.g.alchemy.com/v2/_sTLFEOJwL7dFs2bLmqUo';
-
-    this.provider = new ethers.JsonRpcProvider(url);
+                process.env.BASE_SEPOLIA_RPC_URL 
+    // Explicitly set Base Sepolia network to avoid auto-detection failures
+    const baseSepoliaNetwork = {
+      name: "base-sepolia",
+      chainId: 84532,
+    };
+    this.provider = new ethers.JsonRpcProvider(url, baseSepoliaNetwork, { staticNetwork: true });
     this.wallet = new ethers.Wallet(key, this.provider);
 
     logger.log(`👛 Wallet initialized: ${this.wallet.address}`);

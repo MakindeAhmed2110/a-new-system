@@ -165,6 +165,7 @@ function getChainId(network: SupportedNetworks): number {
     base: 8453,
     "base-sepolia": 84532,
     ethereum: 1,
+    sepolia: 11155111,
     polygon: 137,
     "polygon-amoy": 80002,
   };

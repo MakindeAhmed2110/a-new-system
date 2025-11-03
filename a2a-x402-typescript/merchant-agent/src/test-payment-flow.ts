@@ -78,7 +78,7 @@ class MockAgentExecutor {
     const requirements: PaymentRequirements = {
       scheme: "exact",
       network: "base-sepolia",
-      asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+      asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // Base Sepolia USDC
       payTo: "0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B",
       maxAmountRequired: price,
       description: `Payment for: ${productName}`,

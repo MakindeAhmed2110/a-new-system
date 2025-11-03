@@ -1,107 +1,180 @@
 /**
  * Reputation Query API Endpoint
- * Main endpoint for reputation scoring queries
+ * Main endpoint for reputation scoring queries with x402 payment
  */
 
 import { Request, Response } from 'express';
 import { ReputationQuery, ReputationResponse } from '../types/reputation';
 import { ReputationAggregator } from '../scoring/aggregator';
-import { PaymentHandler } from '../x402/payment-handler';
-import { x402PaymentRequiredException } from '../../a2a-x402-typescript/x402_a2a';
+import { MerchantExecutor } from '../x402/MerchantExecutor';
+import { Agent0DataFetcher } from '../agent0/data-fetcher';
+import type { PaymentPayload } from 'x402/types';
 
 export class ReputationQueryHandler {
   private aggregator: ReputationAggregator;
-  private paymentHandler: PaymentHandler;
+  private merchantExecutor: MerchantExecutor;
+  private agent0DataFetcher: Agent0DataFetcher;
 
-  constructor(aggregator: ReputationAggregator, paymentHandler: PaymentHandler) {
+  constructor(
+    aggregator: ReputationAggregator,
+    merchantExecutor: MerchantExecutor,
+    agent0DataFetcher: Agent0DataFetcher
+  ) {
     this.aggregator = aggregator;
-    this.paymentHandler = paymentHandler;
+    this.merchantExecutor = merchantExecutor;
+    this.agent0DataFetcher = agent0DataFetcher;
   }
 
   /**
    * Handle reputation query request
+   * Supports both A2A message format and simple JSON
    */
-  async handleQuery(req: Request, res: Response): Promise<void> {
+  async handleQuery(req: Request, res: Response): Promise<Response | void> {
     try {
-      const query: ReputationQuery = req.body;
-
-      // Validate request
-      if (!query.address) {
-        res.status(400).json({
-          success: false,
-          error: 'Missing required field: address',
-        } as ReputationResponse);
-        return;
+      console.log('\n📥 Received reputation query request');
+      
+      // Support both A2A message format and simple JSON
+      const message = req.body.message || req.body;
+      const paymentPayload = message.metadata?.['x402.payment.payload'] as PaymentPayload | undefined;
+      const paymentStatus = message.metadata?.['x402.payment.status'];
+      
+      // Extract query parameters from message parts or body
+      let query: ReputationQuery;
+      if (message.parts && Array.isArray(message.parts)) {
+        // A2A format - extract from text parts
+        const textParts = message.parts
+          .filter((p: any) => p.kind === 'text')
+          .map((p: any) => p.text)
+          .join(' ');
+        
+        try {
+          query = JSON.parse(textParts);
+        } catch {
+          // Fallback: try to extract from body
+          query = {
+            agentId: req.body.agentId,
+            address: req.body.address,
+            requesterAddress: req.body.requesterAddress,
+          };
+        }
+      } else {
+        // Simple JSON format
+        query = {
+          agentId: req.body.agentId || message.agentId,
+          address: req.body.address || message.address,
+          requesterAddress: req.body.requesterAddress || message.requesterAddress,
+        };
       }
 
-      // Validate address format
-      if (!/^0x[a-fA-F0-9]{40}$/.test(query.address)) {
-        res.status(400).json({
-          success: false,
-          error: 'Invalid Ethereum address format',
-        } as ReputationResponse);
-        return;
-      }
+      // Check for payment (A2A format)
+      if (!paymentPayload || paymentStatus !== 'payment-submitted') {
+        const paymentRequired = this.merchantExecutor.createPaymentRequiredResponse();
+        console.log('💰 Payment required for reputation query');
 
-      // Check for payment
-      if (!query.paymentPayload) {
-        // Request payment
-        const paymentRequirements = await this.paymentHandler.createPaymentRequirements(
-          `/reputation-query/${query.address}`
-        );
-
-        // Throw x402 payment exception (will be caught by x402 middleware)
-        throw new x402PaymentRequiredException(
-          `Payment of $${this.paymentHandler['config'].price.toFixed(2)} USDC required for reputation query`,
-          paymentRequirements
-        );
+        // Return payment requirement (402 status)
+        return res.status(402).json({
+          x402Version: 1,
+          accepts: paymentRequired.accepts,
+          error: paymentRequired.error,
+        });
       }
 
       // Verify payment
-      const paymentRequirements = await this.paymentHandler.createPaymentRequirements();
-      const isValid = await this.paymentHandler.isValidPayment(
-        query.paymentPayload,
-        paymentRequirements
-      );
+      console.log('🔍 Verifying payment...');
+      const verifyResult = await this.merchantExecutor.verifyPayment(paymentPayload);
 
-      if (!isValid) {
-        res.status(402).json({
+      if (!verifyResult.isValid) {
+        console.log(`❌ Payment verification failed: ${verifyResult.invalidReason}`);
+        return res.status(402).json({
           success: false,
-          error: 'Invalid or missing payment',
+          error: verifyResult.invalidReason || 'Payment verification failed',
         } as ReputationResponse);
-        return;
+      }
+
+      console.log(`✅ Payment verified from: ${verifyResult.payer}`);
+
+      // Resolve agent ID to address if provided
+      let targetAddress = query.address;
+      let agent0Info = null;
+
+      // If agentId is provided, resolve it to address
+      if (query.agentId && !query.address) {
+        if (!Agent0DataFetcher.isValidAgentId(query.agentId)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Invalid Agent0 ID format. Expected format: "chainId:tokenId"',
+          } as ReputationResponse);
+        }
+
+        // Fetch agent info from Agent0
+        agent0Info = await this.agent0DataFetcher.getAgentInfo(query.agentId);
+        
+        if (!agent0Info || !agent0Info.walletAddress) {
+          return res.status(404).json({
+            success: false,
+            error: `Agent not found: ${query.agentId}`,
+          } as ReputationResponse);
+        }
+
+        targetAddress = agent0Info.walletAddress;
+      }
+
+      // Validate request - need either address or agentId
+      if (!targetAddress) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing required field: address or agentId',
+        } as ReputationResponse);
+      }
+
+      // Validate address format
+      if (!/^0x[a-fA-F0-9]{40}$/.test(targetAddress)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid Ethereum address format',
+        } as ReputationResponse);
       }
 
       // Generate query ID
-      const queryId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      const queryId = `query-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
       // Calculate reputation score
+      console.log(`📊 Calculating reputation score for ${targetAddress}...`);
       const reputationScore = await this.aggregator.calculateReputationScore(
-        query.address,
+        targetAddress,
         queryId,
-        query.requesterAddress || query.agentId
+        query.requesterAddress || query.agentId || verifyResult.payer
       );
 
       // Settle payment after successful query
-      await this.paymentHandler.settlePaymentAfterQuery(
-        query.paymentPayload,
-        paymentRequirements
-      );
+      console.log('💰 Settling payment...');
+      const settlement = await this.merchantExecutor.settlePayment(paymentPayload);
 
-      // Return success response
-      res.status(200).json({
+      // Enhance response with Agent0 info if available
+      const response: any = {
         success: true,
         score: reputationScore,
-        message: `Reputation score calculated for ${query.address}`,
-      } as ReputationResponse);
-    } catch (error: any) {
-      // Re-throw x402 payment exceptions (handled by middleware)
-      if (error instanceof x402PaymentRequiredException) {
-        throw error;
+        message: `Reputation score calculated for ${targetAddress}`,
+        settlement: {
+          success: settlement.success,
+          transaction: settlement.transaction,
+          network: settlement.network,
+          payer: settlement.payer,
+        },
+      };
+
+      // Add Agent0 information if available
+      if (agent0Info || query.agentId) {
+        response.agent0 = agent0Info || {
+          agentId: query.agentId,
+        };
       }
 
-      console.error('Error handling reputation query:', error);
-      res.status(500).json({
+      console.log('✅ Query completed successfully');
+      return res.status(200).json(response);
+    } catch (error: any) {
+      console.error('❌ Error handling reputation query:', error);
+      return res.status(500).json({
         success: false,
         error: error.message || 'Internal server error',
       } as ReputationResponse);
@@ -112,12 +185,17 @@ export class ReputationQueryHandler {
    * Health check endpoint
    */
   async healthCheck(req: Request, res: Response): Promise<void> {
+    const requirements = this.merchantExecutor.getPaymentRequirements();
     res.status(200).json({
       status: 'healthy',
       service: 'reputation-scoring-oracle',
       version: '0.1.0',
       timestamp: Date.now(),
+      payment: {
+        address: requirements.payTo,
+        network: requirements.network,
+        price: `$${(parseInt(requirements.maxAmountRequired) / 1_000_000).toFixed(2)}`,
+      },
     });
   }
 }
-

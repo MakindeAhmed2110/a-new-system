@@ -39,7 +39,7 @@ if (!process.env.MERCHANT_WALLET_ADDRESS) {
 
 const WALLET_ADDRESS: string = process.env.MERCHANT_WALLET_ADDRESS;
 const NETWORK = process.env.PAYMENT_NETWORK || "base-sepolia";
-const USDC_CONTRACT = process.env.USDC_CONTRACT || "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+const USDC_CONTRACT = process.env.USDC_CONTRACT || "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; // Base Sepolia USDC
 
 console.log(`💼 Merchant Configuration:
   Wallet: ${WALLET_ADDRESS}
