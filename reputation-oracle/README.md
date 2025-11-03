@@ -572,7 +572,7 @@ PAYMENT_NETWORK=base-sepolia
 - `FARCASTER_API_KEY=...` - For social scoring (optional)
 - `LENS_API_URL=...` - For social scoring (optional)
 
-### Run
+### Run Locally
 
 ```bash
 # Development mode (with hot reload)
@@ -582,6 +582,24 @@ npm run dev
 npm run build
 npm start
 ```
+
+The API will start on `http://localhost:3000` (or your configured PORT).
+
+### Test the API
+
+```bash
+# Health check
+curl http://localhost:3000/health
+
+# Query reputation (will return payment requirements)
+curl -X POST http://localhost:3000/query \
+  -H "Content-Type: application/json" \
+  -d '{"address": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb"}'
+```
+
+### Deploy to Production
+
+For deployment options (Docker, PM2, cloud platforms), see **[DEPLOYMENT.md](./DEPLOYMENT.md)**.
 
 ---
 
@@ -745,6 +763,12 @@ See [.env.example](./.env.example) for a complete list of all environment variab
 - ⏳ API authentication (TODO)
 
 ---
+
+## 📚 Additional Documentation
+
+- **[DEPLOYMENT.md](./DEPLOYMENT.md)** - Complete deployment guide (Docker, PM2, cloud platforms)
+- **[X402_INTEGRATION_GUIDE.md](./X402_INTEGRATION_GUIDE.md)** - Detailed x402 payment integration guide
+- **[.env.example](./.env.example)** - Environment variables template
 
 ## 📄 License
 

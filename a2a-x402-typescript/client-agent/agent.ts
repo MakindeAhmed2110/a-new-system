@@ -20,16 +20,59 @@
 
 import { LlmAgent as Agent } from 'adk-typescript/agents';
 import { ToolContext } from 'adk-typescript/tools';
+import { LiteLlm } from 'adk-typescript/models';
 import { LocalWallet } from './src/wallet/Wallet';
 import { x402Utils, PaymentStatus } from 'a2a-x402';
+import { Wallet } from 'ethers';
 import { logger } from './src/logger';
 
 // --- Client Agent Configuration ---
 
 const MERCHANT_AGENT_URL = process.env.MERCHANT_AGENT_URL || 'http://localhost:10000';
+const REPUTATION_ORACLE_URL = process.env.REPUTATION_ORACLE_URL || 'http://localhost:3000';
+const MERCHANT_WALLET_ADDRESS = process.env.MERCHANT_WALLET_ADDRESS; // Optional: pre-configured merchant address
+
+// --- OpenRouter Configuration ---
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
+
+// Validate OpenRouter API key
+if (!OPENROUTER_API_KEY) {
+  console.error('❌ ERROR: OPENROUTER_API_KEY not set in .env file');
+  console.error('   Please add OPENROUTER_API_KEY to your .env file');
+  throw new Error('Missing required environment variable: OPENROUTER_API_KEY');
+}
+
+// Set environment variables for LiteLLM to use OpenRouter
+// LiteLLM reads these environment variables to configure API access
+// For OpenRouter, we set OpenAI vars since OpenRouter is OpenAI-compatible
+process.env.OPENAI_API_KEY = OPENROUTER_API_KEY;
+process.env.OPENAI_API_BASE = OPENROUTER_BASE_URL;
+
+// Configure LiteLlm with OpenRouter
+// CRITICAL: LiteLLM routes based on model name prefix and may ignore api_base for known providers
+// SOLUTION: Use the model name directly with api_base set - LiteLLM should respect api_base when explicitly set
+// OpenRouter model format: openai/gpt-4o (this is what OpenRouter expects)
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'openai/gpt-4o';
+
+// Create LiteLlm instance configured for OpenRouter
+// CRITICAL FIX: LiteLLM expects baseUrl (camelCase) and apiKey, not api_base and api_key
+// The OpenAIHandler will use baseUrl when provided, routing to OpenRouter instead of OpenAI
+const openRouterLlm = new LiteLlm(OPENROUTER_MODEL, {
+  apiKey: OPENROUTER_API_KEY,      // camelCase, not snake_case
+  baseUrl: OPENROUTER_BASE_URL,     // camelCase, not snake_case
+});
+
+console.log(`🔌 OpenRouter Configuration:
+  Model: ${OPENROUTER_MODEL}
+  Base URL: ${OPENROUTER_BASE_URL}
+  API Key: ${OPENROUTER_API_KEY ? 'Set (hidden)' : 'NOT SET'}
+`);
 
 logger.log(`🤖 Client Agent Configuration:
   Merchant URL: ${MERCHANT_AGENT_URL}
+  Reputation Oracle: ${REPUTATION_ORACLE_URL}
+  Merchant Wallet: ${MERCHANT_WALLET_ADDRESS || 'will be retrieved from payment requirements'}
 `);
 
 // Initialize wallet
@@ -78,10 +121,206 @@ async function ensureSession(): Promise<string> {
   }
 }
 
+// --- Reputation Checking Functions ---
+
+/**
+ * Helper to add timeout to async operations
+ */
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> {
+  const timeout = new Promise<never>((_, reject) => 
+    setTimeout(() => reject(new Error(errorMessage)), timeoutMs)
+  );
+  return Promise.race([promise, timeout]);
+}
+
+/**
+ * Query reputation score from the reputation oracle
+ */
+async function queryReputation(
+  addressOrAgentId: string,
+  wallet: Wallet
+): Promise<{
+  score: number;
+  breakdown: any;
+  settlement?: any;
+}> {
+  console.log(`🔍 Querying reputation for: ${addressOrAgentId}`);
+
+  try {
+    // Step 1: Make initial request (will get 402 if payment required)
+    const response = await fetch(`${REPUTATION_ORACLE_URL}/query`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        address: addressOrAgentId.includes(':') ? undefined : addressOrAgentId,
+        agentId: addressOrAgentId.includes(':') ? addressOrAgentId : undefined,
+      }),
+    });
+
+    // Step 2: Handle payment requirement (402 status)
+    if (response.status === 402) {
+      const paymentReq = await response.json() as {
+        accepts: Array<{
+          scheme: string;
+          network: string;
+          asset: string;
+          payTo: string;
+          maxAmountRequired: string;
+          resource?: string;
+          description?: string;
+          mimeType?: string;
+          maxTimeoutSeconds?: number;
+          [key: string]: any;
+        }>;
+        [key: string]: any;
+      };
+      console.log('💰 Reputation query requires payment:', paymentReq);
+
+      // Step 3: Process payment using a2a-x402
+      const { processPayment } = await import('a2a-x402');
+      const paymentPayload = await processPayment(
+        paymentReq.accepts[0] as any, // Type assertion needed for dynamic payment requirements
+        wallet
+      );
+
+      // Step 4: Retry request with payment (reputation oracle expects payment in metadata)
+      const paidResponse = await fetch(`${REPUTATION_ORACLE_URL}/query`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          address: addressOrAgentId.includes(':') ? undefined : addressOrAgentId,
+          agentId: addressOrAgentId.includes(':') ? addressOrAgentId : undefined,
+          metadata: {
+            'x402.payment.payload': paymentPayload,
+            'x402.payment.status': 'payment-submitted',
+          },
+        }),
+      });
+
+      if (!paidResponse.ok) {
+        throw new Error(`API error: ${paidResponse.status} ${paidResponse.statusText}`);
+      }
+
+      const result = await paidResponse.json() as any;
+      console.log('✅ Reputation score retrieved:', result);
+      
+      // Handle both direct score object and nested score object
+      if (result.score) {
+        if (typeof result.score === 'object' && 'score' in result.score && 'breakdown' in result.score) {
+          return result.score as { score: number; breakdown: any; settlement?: any };
+        }
+        return { score: result.score as number, breakdown: {} };
+      }
+      
+      // If no score property, try to extract from result directly
+      if (result.score !== undefined || (typeof result === 'object' && 'score' in result)) {
+        return {
+          score: result.score || (result as any).score || 0,
+          breakdown: result.breakdown || result.score?.breakdown || {},
+          settlement: result.settlement
+        };
+      }
+      
+      // Fallback: return with defaults
+      return { score: 0, breakdown: {}, settlement: result.settlement };
+    }
+
+    // Free endpoint or already paid
+    if (!response.ok) {
+      throw new Error(`API error: ${response.status} ${response.statusText}`);
+    }
+
+    const result = await response.json() as any;
+    
+    // Handle both direct score object and nested score object
+    if (result.score) {
+      if (typeof result.score === 'object' && 'score' in result.score && 'breakdown' in result.score) {
+        return result.score as { score: number; breakdown: any; settlement?: any };
+      }
+      return { score: result.score as number, breakdown: {} };
+    }
+    
+    // If no score property, try to extract from result directly
+    if (result.score !== undefined || (typeof result === 'object' && 'score' in result)) {
+      return {
+        score: result.score || (result as any).score || 0,
+        breakdown: result.breakdown || result.score?.breakdown || {},
+        settlement: result.settlement
+      };
+    }
+    
+    // Fallback: return with defaults
+    return { score: 0, breakdown: {}, settlement: result.settlement };
+  } catch (error) {
+    console.error('❌ Reputation query failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * Check merchant reputation before transaction
+ */
+async function checkMerchantReputation(
+  params: Record<string, any>,
+  context?: ToolContext
+): Promise<string> {
+  const merchantAddress = params.address || params.merchantAddress || MERCHANT_WALLET_ADDRESS;
+
+  if (!merchantAddress) {
+    return '⚠️ Cannot check reputation: merchant address not provided. The reputation check will be performed automatically when payment details are received.';
+  }
+
+  logger.log(`\n🛡️ Checking merchant reputation for: ${merchantAddress}`);
+
+  try {
+    // Get wallet instance from LocalWallet
+    const ethersWallet = wallet.getWallet() as Wallet;
+    
+    const reputation = await queryReputation(merchantAddress, ethersWallet);
+
+    const score = reputation.score || 0;
+    const breakdown = reputation.breakdown || {};
+    
+    const trustLevel = score >= 70 ? 'Highly Trusted ✅' : score >= 50 ? 'Moderately Trusted ⚠️' : 'Low Trust ❌';
+    const recommendation = score >= 70 ? 'Safe to proceed' : score >= 50 ? 'Proceed with caution' : 'Consider not proceeding';
+
+    logger.log(`✅ Reputation check complete: ${score}/100`);
+
+    return `🛡️ **Merchant Reputation Report**
+
+**Overall Score:** ${score}/100 - ${trustLevel}
+
+**Breakdown:**
+- ENS Identity: ${breakdown.ens?.score || 'N/A'}/100 (20% weight)
+- On-Chain Activity: ${breakdown.onchain?.score || 'N/A'}/100 (30% weight)
+- Wallet Age: ${breakdown.walletAge?.score || 'N/A'}/100 (15% weight)
+- Social Profiles: ${breakdown.social?.score || 'N/A'}/100 (35% weight)
+
+**Recommendation:** ${recommendation}
+
+${score < 50 ? '⚠️ WARNING: This merchant has a low reputation score. Consider verifying their identity or using a smaller transaction amount.' : ''}`;
+
+  } catch (error: any) {
+    logger.error('❌ Reputation check failed:', error);
+    const errorMsg = error.message || String(error);
+    
+    if (errorMsg.includes('REPUTATION_ORACLE_URL') || errorMsg.includes('ECONNREFUSED')) {
+      return `⚠️ Could not check reputation: Reputation oracle is not accessible at ${REPUTATION_ORACLE_URL}. Proceeding without reputation check.`;
+    }
+    
+    return `⚠️ Reputation check failed: ${errorMsg}. Proceeding without reputation verification.`;
+  }
+}
+
 // --- Tool Functions ---
 
 /**
  * Send a message to a remote merchant agent using ADK protocol
+ * Now includes reputation checking before transaction
  */
 async function sendMessageToMerchant(
   params: Record<string, any>,
@@ -146,8 +385,10 @@ async function sendMessageToMerchant(
           const price = BigInt(paymentOption.maxAmountRequired);
           const priceUSDC = (Number(price) / 1_000_000).toFixed(6);
           const productName = paymentOption.extra?.product?.name || 'product';
+          const merchantAddress = paymentOption.payTo;
 
-          // Store payment requirements in state
+          // Store payment requirements in state FIRST (before any async operations)
+          // This ensures ADK can track the function call properly
           state.pendingPayment = {
             agentUrl: MERCHANT_AGENT_URL,
             agentName: 'merchant_agent',
@@ -158,15 +399,38 @@ async function sendMessageToMerchant(
 
           logger.log(`💰 Payment required: ${priceUSDC} USDC for ${productName}`);
 
-          return `The merchant agent responded! They're selling ${productName} for ${priceUSDC} USDC.
+          // Check reputation for this specific merchant address if we have it
+          let reputationWarning = '';
+          if (merchantAddress) {
+            try {
+              logger.log(`\n🛡️ Checking reputation for merchant: ${merchantAddress}`);
+              const ethersWallet = wallet.getWallet() as Wallet;
+              const reputation = await queryReputation(merchantAddress, ethersWallet);
+              const score = reputation.score || 0;
+              
+              if (score < 50) {
+                reputationWarning = `\n\n⚠️ **SECURITY WARNING**: This merchant has a LOW reputation score (${score}/100). Consider verifying their identity before proceeding.`;
+              } else if (score < 70) {
+                reputationWarning = `\n\n⚡ **Reputation Check**: Merchant score is ${score}/100 - moderate trust. Proceed with normal caution.`;
+              } else {
+                reputationWarning = `\n\n✅ **Reputation Verified**: Merchant has a high trust score (${score}/100).`;
+              }
+            } catch (error: any) {
+              logger.warn(`⚠️ Could not check merchant reputation: ${error.message}`);
+              reputationWarning = `\n\n⚠️ Could not verify merchant reputation. Proceed with caution.`;
+            }
+          }
+
+          return `The merchant agent responded! They're selling ${productName} for ${priceUSDC} USDC.${reputationWarning}
 
 **Payment Details:**
 - Product: ${productName}
 - Price: ${priceUSDC} USDC (${price.toString()} atomic units)
 - Network: ${paymentOption.network}
 - Payment Token: ${paymentOption.extra?.name || 'USDC'}
+- Merchant Address: ${merchantAddress}
 
-Would you like to proceed with this payment?`;
+Reply "yes" to confirm the payment, or "no" to cancel.`;
         }
       }
     }
@@ -202,6 +466,8 @@ Would you like to proceed with this payment?`;
   }
 }
 
+// Note: Removed isLongRunning flag as it was causing ADK Step 2 crashes with auto-confirm payment
+
 /**
  * Confirm and sign a pending payment
  */
@@ -221,6 +487,37 @@ async function confirmPayment(
     const merchantAddress = paymentOption.payTo;
     const amount = BigInt(paymentOption.maxAmountRequired);
     const productName = paymentOption.extra?.product?.name || 'product';
+
+    // Final reputation check before payment (critical safety check)
+    // This is the ONLY place reputation is checked to avoid ADK session state issues
+    let reputationWarning = '';
+    let reputationScore: number | null = null;
+    try {
+      logger.log(`\n🛡️ Final reputation check before payment for: ${merchantAddress}`);
+      const ethersWallet = wallet.getWallet() as Wallet;
+      
+      // Add timeout - max 5 seconds for final check
+      const reputation = await withTimeout(
+        queryReputation(merchantAddress, ethersWallet),
+        5000,
+        'Final reputation check timeout (5s)'
+      );
+      reputationScore = reputation.score || 0;
+      
+      if (reputationScore < 50) {
+        logger.warn(`⚠️ LOW REPUTATION: ${reputationScore}/100 - Showing warning but allowing payment`);
+        reputationWarning = `\n\n⚠️ **SECURITY WARNING**: Merchant reputation is LOW (${reputationScore}/100). Proceed with extreme caution.`;
+      } else if (reputationScore < 70) {
+        logger.log(`⚡ Moderate reputation: ${reputationScore}/100`);
+        reputationWarning = `\n\n⚡ **Reputation Check**: Merchant score is ${reputationScore}/100 - moderate trust.`;
+      } else {
+        logger.log(`✅ Reputation verified: ${reputationScore}/100`);
+        reputationWarning = `\n\n✅ **Reputation Verified**: Merchant has a high trust score (${reputationScore}/100).`;
+      }
+    } catch (error: any) {
+      logger.warn(`⚠️ Final reputation check failed: ${error.message} - proceeding with payment`);
+      reputationWarning = `\n\n⚠️ Could not verify merchant reputation before payment. Proceeding with caution.`;
+    }
 
     // Step 1: Sign the payment with wallet (this also handles approval)
     const signedPayload = await wallet.signPayment(state.pendingPayment.requirements);
@@ -292,7 +589,7 @@ async function confirmPayment(
       }
 
       const amountUSDC = (Number(amount) / 1_000_000).toFixed(6);
-      const result = `✅ Payment completed successfully!
+      const result = `✅ Payment completed successfully!${reputationWarning}
 
 **Transaction Details:**
 - Product: ${productName}
@@ -349,7 +646,7 @@ async function getWalletInfo(
 
 export const clientAgent = new Agent({
   name: 'x402_client_agent',
-  model: 'gemini-2.0-flash',
+  model: openRouterLlm, // Use OpenRouter via LiteLlm
   description: 'An orchestrator agent that can interact with merchants and handle payments.',
   instruction: `You are a helpful client agent that assists users in buying products from merchant agents using cryptocurrency payments.
 
@@ -366,9 +663,11 @@ Introduce yourself and explain what you can do:
 **When users want to buy something:**
 1. Use sendMessageToMerchant to request the product from the merchant
 2. The merchant will respond with payment requirements (amount in USDC)
-3. Ask the user to confirm: "The merchant is requesting X USDC for [product]. Do you want to proceed?"
-4. If user confirms ("yes", "confirm", "ok"), use confirmPayment to sign and submit
-5. If user declines ("no", "cancel"), use cancelPayment
+3. Reputation is automatically checked and shown when payment details are received
+4. If reputation is low (< 50), a security warning will be displayed
+5. Ask the user to confirm the purchase
+6. If user confirms ("yes", "confirm", "ok"), use confirmPayment to process the payment
+7. If user declines ("no", "cancel"), use cancelPayment
 
 **Important guidelines:**
 - ALWAYS explain what you're doing in a friendly, clear way
@@ -392,6 +691,7 @@ You: "✅ Payment successful! Your banana order has been confirmed!"`,
 
   tools: [
     sendMessageToMerchant,
+    checkMerchantReputation,
     confirmPayment,
     cancelPayment,
     getWalletInfo,

@@ -7,7 +7,7 @@ import { Request, Response } from 'express';
 import { ethers } from 'ethers';
 import { Agent0DataFetcher } from '../agent0/data-fetcher';
 import { MerchantExecutor } from '../x402/MerchantExecutor';
-import type { PaymentPayload } from 'x402/types';
+import type { PaymentPayload } from 'x402/dist/cjs/types';
 
 export interface ActivityRegistration {
   agentId?: string;
@@ -120,14 +120,21 @@ export class ActivityHandler {
           });
         }
 
-        const resolved = await this.agent0DataFetcher.getAgentWalletAddress(activityData.agentId);
-        if (!resolved) {
-          return res.status(404).json({
+        try {
+          const resolved = await this.agent0DataFetcher.getAgentWalletAddress(activityData.agentId);
+          if (!resolved) {
+            return res.status(404).json({
+              success: false,
+              error: `Agent not found: ${activityData.agentId}`,
+            });
+          }
+          walletAddress = resolved;
+        } catch (agent0Error: any) {
+          return res.status(503).json({
             success: false,
-            error: `Agent not found: ${activityData.agentId}`,
+            error: `Agent0 SDK unavailable: ${agent0Error.message}. Please provide walletAddress directly.`,
           });
         }
-        walletAddress = resolved;
       }
 
       if (!walletAddress) {

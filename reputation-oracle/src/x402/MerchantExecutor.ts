@@ -8,7 +8,7 @@ import type {
   Network,
   PaymentPayload,
   PaymentRequirements,
-} from 'x402/types';
+} from 'x402/dist/cjs/types';
 import { ethers } from 'ethers';
 
 const DEFAULT_FACILITATOR_URL = 'https://x402.org/facilitator';
@@ -214,20 +214,27 @@ export class MerchantExecutor {
       },
     };
 
-    this.mode =
-      options.settlementMode ??
-      (options.facilitatorUrl || !options.privateKey ? 'facilitator' : 'direct');
+    // Determine settlement mode
+    // Priority: explicit setting > private key availability > facilitator URL
+    if (options.settlementMode) {
+      this.mode = options.settlementMode;
+    } else if (options.privateKey) {
+      // If private key is provided, prefer direct mode for better control
+      this.mode = 'direct';
+    } else if (options.facilitatorUrl) {
+      this.mode = 'facilitator';
+    } else {
+      // Default: try facilitator, but will fallback to local verification
+      this.mode = 'facilitator';
+    }
+    
+    console.log(`💳 Payment settlement mode: ${this.mode}`);
 
-    if (this.mode === 'direct') {
+    // Initialize wallet if private key is provided (for direct mode or fallback)
+    if (options.privateKey) {
       if (options.network === 'solana' || options.network === 'solana-devnet') {
         throw new Error(
           'Direct settlement is only supported on EVM networks.'
-        );
-      }
-
-      if (!options.privateKey) {
-        throw new Error(
-          'Direct settlement requires PRIVATE_KEY to be configured.'
         );
       }
 
@@ -255,15 +262,27 @@ export class MerchantExecutor {
           normalizedKey,
           this.settlementProvider
         );
-        console.log('⚡ Local settlement enabled via RPC provider');
+          const walletAddress = this.settlementWallet.address;
+          if (this.mode === 'direct') {
+            console.log('⚡ Direct settlement enabled (local wallet configured)');
+            console.log(`   Settlement wallet: ${walletAddress}`);
+            console.log(`   ⚠️  Ensure this wallet has native tokens (ETH) for gas fees on ${this.network}!`);
+          } else {
+            console.log('⚡ Settlement wallet configured (for fallback if facilitator fails)');
+            console.log(`   Settlement wallet: ${walletAddress}`);
+            console.log(`   ⚠️  Ensure this wallet has native tokens (ETH) for gas fees on ${this.network}!`);
+          }
       } catch (error) {
         throw new Error(
-          `Failed to initialize direct settlement: ${
+          `Failed to initialize settlement wallet: ${
             error instanceof Error ? error.message : String(error)
           }`
         );
       }
-    } else {
+    }
+
+    // Configure facilitator if not in direct mode
+    if (this.mode === 'facilitator') {
       this.facilitatorUrl = options.facilitatorUrl || DEFAULT_FACILITATOR_URL;
       this.facilitatorApiKey = options.facilitatorApiKey;
     }
@@ -287,10 +306,23 @@ export class MerchantExecutor {
     console.log(`   Scheme: ${payload.scheme}`);
 
     try {
-      const result =
-        this.mode === 'direct'
-          ? this.verifyPaymentLocally(payload, this.requirements)
-          : await this.callFacilitator<VerifyResult>('verify', payload);
+      let result: VerifyResult;
+      
+      // Try facilitator first if configured, fallback to local verification
+      if (this.mode === 'facilitator') {
+        console.log('   Mode: facilitator (will fallback to local if facilitator fails)');
+        try {
+          result = await this.callFacilitator<VerifyResult>('verify', payload);
+          console.log('   ✅ Facilitator verification succeeded');
+        } catch (facilitatorError: any) {
+          console.warn(`   ⚠️ Facilitator verification failed: ${facilitatorError.message}`);
+          console.log('   🔄 Falling back to local verification...');
+          result = this.verifyPaymentLocally(payload, this.requirements);
+        }
+      } else {
+        console.log('   Mode: direct (using local verification)');
+        result = this.verifyPaymentLocally(payload, this.requirements);
+      }
 
       console.log('\n📋 Verification result:');
       console.log(`   Valid: ${result.isValid}`);
@@ -321,10 +353,20 @@ export class MerchantExecutor {
     console.log(`   Pay to: ${this.requirements.payTo}`);
 
     try {
-      const result =
-        this.mode === 'direct'
-          ? await this.settleOnChain(payload, this.requirements)
-          : await this.callFacilitator<SettlementResult>('settle', payload);
+      let result: SettlementResult;
+      
+      // Try facilitator first if configured, fallback to local settlement
+      if (this.mode === 'facilitator') {
+        try {
+          result = await this.callFacilitator<SettlementResult>('settle', payload);
+        } catch (facilitatorError: any) {
+          console.warn(`⚠️ Facilitator settlement failed: ${facilitatorError.message}, falling back to local settlement`);
+          result = await this.settleOnChain(payload, this.requirements);
+        }
+      } else {
+        // Direct mode: use local settlement
+        result = await this.settleOnChain(payload, this.requirements);
+      }
 
       console.log('\n✅ Payment settlement result:');
       console.log(`   Success: ${result.success}`);
@@ -361,14 +403,27 @@ export class MerchantExecutor {
     payload: PaymentPayload,
     requirements: PaymentRequirements
   ): VerifyResult {
+    console.log('🔍 Local verification - examining payload structure...');
+    console.log('   Payload keys:', Object.keys(payload));
+    console.log('   Payload.payload type:', typeof payload.payload);
+    
     const exactPayload = payload.payload as any;
+    console.log('   Exact payload keys:', exactPayload ? Object.keys(exactPayload) : 'null');
+    
     const authorization = exactPayload?.authorization;
     const signature = exactPayload?.signature;
 
+    console.log('   Has authorization:', !!authorization);
+    console.log('   Has signature:', !!signature);
+
     if (!authorization || !signature) {
+      console.error('❌ Missing authorization or signature');
+      console.error('   Authorization:', authorization);
+      console.error('   Signature:', signature ? 'present' : 'missing');
+      console.error('   Full payload:', JSON.stringify(payload, null, 2));
       return {
         isValid: false,
-        invalidReason: 'Missing payment authorization data',
+        invalidReason: 'Missing payment authorization data. Expected payload.payload.authorization and payload.payload.signature',
       };
     }
 
@@ -428,7 +483,13 @@ export class MerchantExecutor {
     }
 
     try {
+      console.log('🔍 Verifying EIP-712 signature...');
       const domain = this.buildEip712Domain(requirements);
+      console.log('   Domain:', JSON.stringify(domain, null, 2));
+      console.log('   Authorization from:', authorization.from);
+      console.log('   Authorization to:', authorization.to);
+      console.log('   Authorization value:', authorization.value);
+      
       const recovered = ethers.verifyTypedData(
         domain,
         TRANSFER_AUTH_TYPES,
@@ -443,23 +504,29 @@ export class MerchantExecutor {
         signature
       );
 
+      console.log('   Recovered address:', recovered);
+      console.log('   Expected address:', authorization.from);
+
       if (recovered.toLowerCase() !== authorization.from.toLowerCase()) {
+        console.error('❌ Address mismatch');
         return {
           isValid: false,
-          invalidReason: 'Signature does not match payer address',
+          invalidReason: `Signature does not match payer address. Expected ${authorization.from}, got ${recovered}`,
         };
       }
 
+      console.log('✅ Local verification successful!');
       return {
         isValid: true,
         payer: recovered,
       };
     } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error('❌ EIP-712 verification error:', errorMsg);
+      console.error('   Error details:', error);
       return {
         isValid: false,
-        invalidReason: `Signature verification failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        invalidReason: `Signature verification failed: ${errorMsg}`,
       };
     }
   }
@@ -489,6 +556,77 @@ export class MerchantExecutor {
     }
 
     try {
+      // Validate and convert authorization parameters to correct types
+      console.log('🔧 Preparing settlement transaction...');
+      console.log(`   From: ${authorization.from}`);
+      console.log(`   To: ${authorization.to}`);
+      console.log(`   Value (raw): ${authorization.value}`);
+      console.log(`   ValidAfter (raw): ${authorization.validAfter}`);
+      console.log(`   ValidBefore (raw): ${authorization.validBefore}`);
+      console.log(`   Nonce: ${authorization.nonce}`);
+
+      // Validate required fields
+      if (!authorization.value) {
+        return {
+          success: false,
+          network: requirements.network,
+          payer: authorization.from,
+          errorReason: 'Missing authorization value',
+        };
+      }
+
+      // Convert to BigInt for uint256 parameters
+      let value: bigint;
+      let validAfter: bigint;
+      let validBefore: bigint;
+
+      try {
+        value = typeof authorization.value === 'string' 
+          ? BigInt(authorization.value) 
+          : BigInt(String(authorization.value));
+        validAfter = authorization.validAfter 
+          ? (typeof authorization.validAfter === 'string' 
+              ? BigInt(authorization.validAfter) 
+              : BigInt(authorization.validAfter))
+          : 0n;
+        validBefore = authorization.validBefore 
+          ? (typeof authorization.validBefore === 'string' 
+              ? BigInt(authorization.validBefore) 
+              : BigInt(authorization.validBefore))
+          : 0n;
+      } catch (conversionError: any) {
+        console.error('❌ Failed to convert authorization values:', conversionError);
+        return {
+          success: false,
+          network: requirements.network,
+          payer: authorization.from,
+          errorReason: `Invalid authorization value format: ${conversionError.message}`,
+        };
+      }
+
+      console.log(`   Value (converted): ${value.toString()}`);
+      console.log(`   ValidAfter (converted): ${validAfter.toString()}`);
+      console.log(`   ValidBefore (converted): ${validBefore.toString()}`);
+
+      // Parse signature with error handling
+      let parsedSignature: ethers.Signature;
+      try {
+        console.log('🔍 Parsing signature...');
+        parsedSignature = ethers.Signature.from(signature);
+        console.log(`   Signature v: ${parsedSignature.v}`);
+        console.log(`   Signature r: ${parsedSignature.r}`);
+        console.log(`   Signature s: ${parsedSignature.s}`);
+      } catch (sigError: any) {
+        console.error('❌ Failed to parse signature:', sigError.message);
+        return {
+          success: false,
+          network: requirements.network,
+          payer: authorization.from,
+          errorReason: `Invalid signature format: ${sigError.message}`,
+        };
+      }
+
+      // Create contract instance
       const usdcContract = new ethers.Contract(
         requirements.asset,
         [
@@ -507,21 +645,30 @@ export class MerchantExecutor {
         this.settlementWallet
       );
 
-      const parsedSignature = ethers.Signature.from(signature);
+      console.log('📤 Sending settlement transaction...');
       const tx = await usdcContract.transferWithAuthorization(
         authorization.from,
         authorization.to,
-        authorization.value,
-        authorization.validAfter,
-        authorization.validBefore,
+        value,
+        validAfter,
+        validBefore,
         authorization.nonce,
         parsedSignature.v,
         parsedSignature.r,
         parsedSignature.s
       );
 
+      console.log(`⏳ Transaction sent: ${tx.hash}`);
+      console.log('   Waiting for confirmation...');
+
       const receipt = await tx.wait();
       const success = receipt?.status === 1;
+
+      if (success) {
+        console.log(`✅ Settlement transaction confirmed: ${receipt.hash}`);
+      } else {
+        console.error(`❌ Settlement transaction reverted: ${receipt.hash}`);
+      }
 
       return {
         success,
@@ -530,13 +677,39 @@ export class MerchantExecutor {
         payer: authorization.from,
         errorReason: success ? undefined : 'Transaction reverted',
       };
-    } catch (error) {
+    } catch (error: any) {
+      console.error('❌ Settlement error:', error);
+      console.error('   Error type:', error?.constructor?.name);
+      console.error('   Error message:', error?.message);
+      
+      // Extract more detailed error information
+      let errorReason = 'Unknown settlement error';
+      if (error instanceof Error) {
+        errorReason = error.message;
+        
+        // Check for common error patterns
+        const errorAny = error as any;
+        
+        if (error.message.includes('insufficient funds')) {
+          errorReason = `Insufficient funds for gas. Settlement wallet needs native tokens (ETH) for ${this.network}.`;
+        } else if (error.message.includes('nonce')) {
+          errorReason = `Transaction nonce error: ${error.message}`;
+        } else if (error.message.includes('revert') || errorAny.reason) {
+          errorReason = `Contract revert: ${errorAny.reason || error.message}`;
+        } else if (errorAny.code === 'ACTION_REJECTED') {
+          errorReason = 'Transaction was rejected';
+        } else if (errorAny.code === 'NETWORK_ERROR') {
+          errorReason = 'Network error during settlement';
+        }
+      } else if (typeof error === 'string') {
+        errorReason = error;
+      }
+
       return {
         success: false,
         network: requirements.network,
-        payer: authorization.from,
-        errorReason:
-          error instanceof Error ? error.message : String(error),
+        payer: authorization?.from,
+        errorReason,
       };
     }
   }
@@ -566,26 +739,41 @@ export class MerchantExecutor {
       throw new Error('Facilitator URL is not configured.');
     }
 
-    const response = await fetch(`${this.facilitatorUrl}/${endpoint}`, {
-      method: 'POST',
-      headers: this.buildHeaders(),
-      body: JSON.stringify({
-        x402Version: payload.x402Version ?? 1,
-        paymentPayload: payload,
-        paymentRequirements: this.requirements,
-      }),
-    });
+    // Add timeout to prevent hanging
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+    
+    try {
+      const response = await fetch(`${this.facilitatorUrl}/${endpoint}`, {
+        method: 'POST',
+        headers: this.buildHeaders(),
+        body: JSON.stringify({
+          x402Version: payload.x402Version ?? 1,
+          paymentPayload: payload,
+          paymentRequirements: this.requirements,
+        }),
+        signal: controller.signal,
+      });
 
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(
-        `Facilitator ${endpoint} failed (${response.status}): ${
-          text || response.statusText
-        }`
-      );
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(
+          `Facilitator ${endpoint} failed (${response.status}): ${
+            text || response.statusText
+          }`
+        );
+      }
+
+      return (await response.json()) as T;
+    } catch (fetchError: any) {
+      clearTimeout(timeoutId);
+      if (fetchError.name === 'AbortError') {
+        throw new Error('Facilitator request timed out after 10 seconds');
+      }
+      throw new Error(`Facilitator request failed: ${fetchError.message}`);
     }
-
-    return (await response.json()) as T;
   }
 
   private buildEip712Domain(requirements: PaymentRequirements) {

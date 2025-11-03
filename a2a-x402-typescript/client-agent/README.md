@@ -29,10 +29,32 @@ cp .env.example .env
 Edit with your values:
 
 ```bash
-GOOGLE_API_KEY=your_gemini_api_key
+# OpenRouter Configuration (REQUIRED)
+OPENROUTER_API_KEY=sk-or-v1-xxxxxxxxxxxxxxxxxxxxx
+# Optional: Customize model (default: openrouter/google/gemini-2.0-flash)
+# OPENROUTER_MODEL=openrouter/google/gemini-2.0-flash
+# OPENROUTER_MODEL=openrouter/anthropic/claude-3.5-sonnet
+# OPENROUTER_MODEL=openai/gpt-4o
+# Optional: For OpenRouter rankings
+# OPENROUTER_SITE_URL=http://localhost:3001
+# OPENROUTER_SITE_NAME=x402-client-agent
+
+# Wallet Configuration (REQUIRED)
 WALLET_PRIVATE_KEY=0xYourClientPrivateKey
 BASE_SEPOLIA_RPC_URL=https://base-sepolia.g.alchemy.com/v2/YOUR_KEY
+
+# Agent URLs
+MERCHANT_AGENT_URL=http://localhost:10000
+
+# Reputation Oracle Integration (optional but recommended)
+REPUTATION_ORACLE_URL=http://localhost:3000
+# For production: REPUTATION_ORACLE_URL=https://your-oracle.up.railway.app
+
+# Optional: Pre-configured merchant address for reputation checks
+MERCHANT_WALLET_ADDRESS=0xYourMerchantAddress
 ```
+
+**Note:** The agent now uses OpenRouter instead of direct Gemini API. You can access multiple models through OpenRouter including Gemini, Claude, GPT-4, and more. See [OpenRouter Models](https://openrouter.ai/models) for available models.
 
 ### 3. Fund Your Wallet
 
@@ -65,11 +87,13 @@ Agent: ✅ Payment completed successfully!
 ## How It Works
 
 1. **Request product** → Agent contacts merchant
-2. **Receive payment requirements** → Merchant responds with USDC amount
-3. **User confirmation** → Agent shows payment details and asks to proceed
-4. **Approve tokens** → Wallet approves USDC spending (client pays gas)
-5. **Transfer payment** → Wallet transfers USDC to merchant (client pays gas)
-6. **Order confirmed** → User receives confirmation
+2. **Reputation check** → Automatically checks merchant reputation score (if available)
+3. **Receive payment requirements** → Merchant responds with USDC amount
+4. **Merchant reputation verified** → Reputation score shown with payment details
+5. **User confirmation** → Agent shows payment details + reputation and asks to proceed
+6. **Approve tokens** → Wallet approves USDC spending (client pays gas)
+7. **Transfer payment** → Wallet transfers USDC to merchant (client pays gas)
+8. **Order confirmed** → User receives confirmation
 
 ## Security
 
@@ -116,9 +140,20 @@ await usdcContract.approve(merchantAddress, 0);
 - Verify RPC URL is correct
 - Check network connectivity
 
+## Reputation Checking
+
+The client agent now automatically checks merchant reputation before transactions using the Reputation Scoring Oracle. See [REPUTATION_INTEGRATION.md](../REPUTATION_INTEGRATION.md) for details.
+
+**Features:**
+- Automatic reputation checks before purchase requests
+- Reputation verification when payment details are received
+- Security warnings for low-reputation merchants
+- Manual reputation checking via `checkMerchantReputation` tool
+
 ## Related
 
 - [Merchant Agent](../merchant-agent/README.md)
+- [Reputation Oracle Integration](../REPUTATION_INTEGRATION.md)
 - [x402 Protocol Library](../x402_a2a/README.md)
 
 ## License

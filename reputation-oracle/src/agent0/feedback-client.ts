@@ -1,10 +1,11 @@
 /**
  * Agent0 Feedback Client
  * Integrates with Agent0 SDK for feedback submission and retrieval
+ * Uses local SDK integration
  */
 
-import { SDK } from 'agent0-sdk';
 import { ethers } from 'ethers';
+import type { SDK } from './sdk';
 
 export interface FeedbackData {
   agentId: string;
@@ -25,12 +26,14 @@ export interface FeedbackData {
 export class Agent0FeedbackClient {
   private sdk: SDK | null = null;
   private signer: ethers.Wallet | null = null;
+  private privateKey?: string;
   private chainId: number;
   private rpcUrl: string;
 
   constructor(rpcUrl: string, chainId: number, privateKey?: string) {
     this.rpcUrl = rpcUrl;
     this.chainId = chainId;
+    this.privateKey = privateKey;
 
     if (privateKey) {
       const provider = new ethers.JsonRpcProvider(rpcUrl);
@@ -44,13 +47,17 @@ export class Agent0FeedbackClient {
   private async initializeSDK(): Promise<void> {
     if (this.sdk) return;
 
+    // Import local SDK
+    const { SDK } = await import('./sdk');
+
     const config: any = {
       chainId: this.chainId,
       rpcUrl: this.rpcUrl,
     };
 
-    if (this.signer) {
-      config.signer = this.signer;
+    // Pass private key if available (needed for submitting feedback)
+    if (this.privateKey) {
+      config.signer = this.privateKey;
     }
 
     this.sdk = new SDK(config);
@@ -66,43 +73,19 @@ export class Agent0FeedbackClient {
       throw new Error('SDK not initialized');
     }
 
-    // The SDK prepareFeedback might have different signatures
-    // Try to call it flexibly
-    try {
-      const feedbackData: any = {
-        agentId: data.agentId,
-        score: data.score,
-      };
-      
-      if (data.tags) feedbackData.tags = data.tags;
-      if (data.capability) feedbackData.capability = data.capability;
-      if (data.name) feedbackData.name = data.name;
-      if (data.skill) feedbackData.skill = data.skill;
-      if (data.task) feedbackData.task = data.task;
-      if (data.context) feedbackData.context = data.context;
-      if (data.proofOfPayment) feedbackData.proofOfPayment = data.proofOfPayment;
-
-      // Try calling prepareFeedback if it exists
-      if (typeof (this.sdk as any).prepareFeedback === 'function') {
-        return await (this.sdk as any).prepareFeedback(feedbackData);
-      }
-      
-      // If method doesn't exist, return the data structure itself
-      return feedbackData;
-    } catch (error: any) {
-      // If prepareFeedback fails, return the structured data
-      return {
-        agentId: data.agentId,
-        score: data.score,
-        tags: data.tags,
-        capability: data.capability,
-        name: data.name,
-        skill: data.skill,
-        task: data.task,
-        context: data.context,
-        proofOfPayment: data.proofOfPayment,
-      };
-    }
+    // Call SDK prepareFeedback with correct signature
+    return this.sdk.prepareFeedback(
+      data.agentId,
+      data.score,
+      data.tags,
+      undefined, // text
+      data.capability,
+      data.name,
+      data.skill,
+      data.task,
+      data.context,
+      data.proofOfPayment
+    );
   }
 
   /**
@@ -122,30 +105,19 @@ export class Agent0FeedbackClient {
     // Prepare feedback file
     const feedbackFile = await this.prepareFeedback(data);
 
-    // Submit on-chain - check SDK method signature
-    // The SDK method may vary, so we'll try a flexible approach
-    try {
-      // Try standard method signature
-      const result = await (this.sdk as any).giveFeedback(
-        data.agentId,
-        feedbackFile
-      );
+    // Submit on-chain using SDK method
+    const result = await this.sdk.giveFeedback(
+      data.agentId,
+      feedbackFile,
+      feedbackAuth
+    );
 
-      // Handle different return types
-      if (typeof result === 'string') {
-        return result;
-      } else if (result?.id) {
-        return result.id;
-      } else if (result?.feedbackId) {
-        return result.feedbackId;
-      }
-      
-      return `feedback-${Date.now()}`;
-    } catch (error: any) {
-      // If SDK method doesn't exist or has different signature, return a placeholder
-      console.warn('Agent0 SDK giveFeedback method not available or has different signature:', error.message);
-      return `feedback-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    }
+    // SDK returns Feedback object, extract ID
+    const feedbackId = Array.isArray(result.id) 
+      ? `${result.id[0]}:${result.id[1]}:${result.id[2]}` // Format: "agentId:clientAddress:feedbackIndex"
+      : (result as any).id || `feedback-${Date.now()}`;
+    
+    return feedbackId;
   }
 
   /**

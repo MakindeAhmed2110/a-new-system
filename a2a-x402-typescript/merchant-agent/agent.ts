@@ -22,6 +22,7 @@
  */
 
 import { LlmAgent as Agent } from 'adk-typescript/agents';
+import { LiteLlm } from 'adk-typescript/models';
 import { createHash } from 'crypto';
 import {
   x402PaymentRequiredException,
@@ -41,10 +42,38 @@ const WALLET_ADDRESS: string = process.env.MERCHANT_WALLET_ADDRESS;
 const NETWORK = process.env.PAYMENT_NETWORK || "base-sepolia";
 const USDC_CONTRACT = process.env.USDC_CONTRACT || "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; // Base Sepolia USDC
 
+// --- OpenRouter Configuration ---
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
+
+if (!OPENROUTER_API_KEY) {
+  console.error('❌ ERROR: OPENROUTER_API_KEY not set in .env file');
+  console.error('   Please add OPENROUTER_API_KEY to your .env file');
+  throw new Error('Missing required environment variable: OPENROUTER_API_KEY');
+}
+
+// Set environment variables for LiteLLM to use OpenRouter
+process.env.OPENAI_API_KEY = OPENROUTER_API_KEY;
+process.env.OPENAI_API_BASE = OPENROUTER_BASE_URL;
+
+// Configure LiteLlm with OpenRouter
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'openai/gpt-4o';
+
+// Create LiteLlm instance configured for OpenRouter
+const openRouterLlm = new LiteLlm(OPENROUTER_MODEL, {
+  apiKey: OPENROUTER_API_KEY,
+  baseUrl: OPENROUTER_BASE_URL,
+});
+
 console.log(`💼 Merchant Configuration:
   Wallet: ${WALLET_ADDRESS}
   Network: ${NETWORK}
   USDC Contract: ${USDC_CONTRACT}
+  
+🔌 OpenRouter Configuration:
+  Model: ${OPENROUTER_MODEL}
+  Base URL: ${OPENROUTER_BASE_URL}
+  API Key: ${OPENROUTER_API_KEY ? 'Set (hidden)' : 'NOT SET'}
 `);
 
 // --- Helper Functions ---
@@ -132,7 +161,7 @@ async function checkOrderStatus(
 
 export const merchantAgent = new Agent({
   name: "x402_merchant_agent",
-  model: "gemini-2.0-flash",
+  model: openRouterLlm, // Use OpenRouter via LiteLlm
   description: "A production-ready merchant agent that sells products using the x402 payment protocol.",
   instruction: `You are a helpful and friendly merchant agent powered by the x402 payment protocol.
 

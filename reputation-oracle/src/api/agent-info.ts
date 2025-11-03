@@ -19,7 +19,7 @@ export class AgentInfoHandler {
   /**
    * Get comprehensive agent information
    */
-  async getAgentInfo(req: Request, res: Response): Promise<void> {
+  async getAgentInfo(req: Request, res: Response): Promise<Response | void> {
     try {
       const { agentId } = req.params;
 
@@ -39,8 +39,16 @@ export class AgentInfoHandler {
         return;
       }
 
-      // Fetch Agent0 information
-      const agent0Info = await this.agent0DataFetcher.getAgentInfo(agentId);
+      // Fetch Agent0 information (may fail if SDK unavailable)
+      let agent0Info: Agent0Info | null;
+      try {
+        agent0Info = await this.agent0DataFetcher.getAgentInfo(agentId);
+      } catch (error: any) {
+        return res.status(503).json({
+          success: false,
+          error: `Agent0 SDK unavailable: ${error.message}. Agent0 features are currently disabled.`,
+        });
+      }
 
       if (!agent0Info) {
         res.status(404).json({

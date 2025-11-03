@@ -7,7 +7,7 @@ import { Request, Response } from 'express';
 import { Agent0FeedbackClient, FeedbackData } from '../agent0/feedback-client';
 import { MerchantExecutor } from '../x402/MerchantExecutor';
 import { Agent0DataFetcher } from '../agent0/data-fetcher';
-import type { PaymentPayload } from 'x402/types';
+import type { PaymentPayload } from 'x402/dist/cjs/types';
 
 export interface FeedbackRequest {
   targetAgentId: string;
@@ -112,8 +112,17 @@ export class FeedbackHandler {
         });
       }
 
-      // Check if agent exists
-      const agentInfo = await this.agent0DataFetcher.getAgentInfo(feedbackData.targetAgentId);
+      // Check if agent exists (may fail if SDK unavailable)
+      let agentInfo;
+      try {
+        agentInfo = await this.agent0DataFetcher.getAgentInfo(feedbackData.targetAgentId);
+      } catch (agent0Error: any) {
+        return res.status(503).json({
+          success: false,
+          error: `Agent0 SDK unavailable: ${agent0Error.message}. Feedback submission requires Agent0 features.`,
+        });
+      }
+
       if (!agentInfo) {
         return res.status(404).json({
           success: false,

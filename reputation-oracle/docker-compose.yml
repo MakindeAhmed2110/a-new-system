@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  reputation-oracle:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: reputation-oracle
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      # Server Configuration
+      - NODE_ENV=production
+      - PORT=${PORT:-3000}
+      - SERVICE_URL=${SERVICE_URL:-http://localhost:3000}
+
+      # Required: Core Configuration
+      - RPC_URL=${RPC_URL}
+      - PAYMENT_WALLET_ADDRESS=${PAYMENT_WALLET_ADDRESS}
+      - PAYMENT_NETWORK=${PAYMENT_NETWORK:-base-sepolia}
+
+      # Optional: Pricing
+      - QUERY_PRICE=${QUERY_PRICE:-0.01}
+      - ACTIVITY_PRICE=${ACTIVITY_PRICE:-0.01}
+      - FEEDBACK_PRICE=${FEEDBACK_PRICE:-0.01}
+
+      # Optional: Payment Settlement
+      - SETTLEMENT_MODE=${SETTLEMENT_MODE:-facilitator}
+      - FACILITATOR_URL=${FACILITATOR_URL:-https://x402.org/facilitator}
+      - FACILITATOR_API_KEY=${FACILITATOR_API_KEY:-}
+      - PRIVATE_KEY=${PRIVATE_KEY:-}
+
+      # Optional: Agent0 Registration
+      - AGENT0_PRIVATE_KEY=${AGENT0_PRIVATE_KEY:-}
+      - AGENT0_RPC_URL=${AGENT0_RPC_URL:-}
+      - AGENT0_AGENT_URL=${AGENT0_AGENT_URL:-}
+
+      # Optional: IPFS Configuration
+      - IPFS_API_URL=${IPFS_API_URL:-}
+      - IPFS_API_KEY=${IPFS_API_KEY:-}
+      - IPFS_PROVIDER=${IPFS_PROVIDER:-node}
+      - PINATA_JWT=${PINATA_JWT:-}
+      - FILECOIN_PRIVATE_KEY=${FILECOIN_PRIVATE_KEY:-}
+
+      # Optional: Social APIs
+      - FARCASTER_API_URL=${FARCASTER_API_URL:-https://api.farcaster.xyz}
+      - FARCASTER_API_KEY=${FARCASTER_API_KEY:-}
+      - LENS_API_URL=${LENS_API_URL:-https://api.lens.dev}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    # Optionally mount a local .env file (alternative to environment section above)
+    # env_file:
+    #   - .env
+    networks:
+      - oracle-network
+
+networks:
+  oracle-network:
+    driver: bridge
+

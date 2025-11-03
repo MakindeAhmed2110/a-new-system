@@ -83,19 +83,42 @@ class AgentExecutorAdapter {
 
       clearLastPaymentException(); // Clear any previous exception
 
-      // Use ADK Runner to execute the agent with proper session management
-      for await (const event of runner.runAsync({
-        userId: 'client-user',
-        sessionId: context.contextId,
-        newMessage: context.message,
-      })) {
-        await eventQueue.enqueueEvent({
-          id: context.taskId,
-          status: {
-            state: 'input-required',
-            message: event,
-          },
-        });
+      // Bypass LLM for simple purchase messages to avoid provider tool limits
+      const parts = context?.message?.parts || [];
+      const text = parts.find((p: any) => typeof p?.text === 'string')?.text as string | undefined;
+      let ranDirectTool = false;
+      if (text && typeof text === 'string') {
+        const lower = text.toLowerCase();
+        const looksLikePurchase = lower.includes('buy') || lower.includes('purchase') || lower.trim().split(' ').length <= 4;
+        if (looksLikePurchase) {
+          try {
+            const tools: any[] = (wrappedMerchantAgent as any).tools || [];
+            const directTool = tools.find((t: any) => typeof t === 'function' && t.name === 'getProductDetailsAndRequestPayment');
+            if (directTool) {
+              await directTool(text, undefined);
+              ranDirectTool = true;
+            }
+          } catch (e) {
+            // Wrapped tool sets lastPaymentException; ignore here
+          }
+        }
+      }
+
+      if (!ranDirectTool) {
+        // Use ADK Runner to execute the agent with proper session management
+        for await (const event of runner.runAsync({
+          userId: 'client-user',
+          sessionId: context.contextId,
+          newMessage: context.message,
+        })) {
+          await eventQueue.enqueueEvent({
+            id: context.taskId,
+            status: {
+              state: 'input-required',
+              message: event,
+            },
+          });
+        }
       }
 
       // After execution, check if a payment exception was caught

@@ -45,6 +45,13 @@ export class LocalWallet extends Wallet {
   private wallet: ethers.Wallet;
   private provider: ethers.JsonRpcProvider;
 
+  /**
+   * Get the underlying ethers wallet instance
+   */
+  getWallet(): ethers.Wallet {
+    return this.wallet;
+  }
+
   constructor(privateKey?: string, rpcUrl?: string) {
     super();
 

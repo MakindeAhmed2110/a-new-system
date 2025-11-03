@@ -1,10 +1,11 @@
 /**
  * Agent0 SDK Integration - Registration Module
  * Registers the reputation oracle as an agent on-chain (ERC-8004)
+ * Uses local SDK integration from ./sdk
  */
 
-import { SDK } from 'agent0-sdk';
 import { ethers } from 'ethers';
+import type { SDK } from './sdk';
 
 export interface Agent0Config {
   privateKey: string;
@@ -56,11 +57,14 @@ export class Agent0Registration {
         ipfsConfig.ipfsNodeUrl = this.config.ipfs.apiUrl;
       }
 
+      // Import local SDK
+      const { SDK } = await import('./sdk');
+      
       // Initialize SDK
       this.sdk = new SDK({
         chainId: this.config.chainId,
         rpcUrl: this.config.rpcUrl,
-        signer: signer,
+        signer: this.config.privateKey, // Pass private key instead of signer object
         ...ipfsConfig,
       });
 
@@ -82,11 +86,11 @@ export class Agent0Registration {
 
       // Set trust models (reputation-based + crypto-economic)
       console.log('🛡️ Setting trust models...');
-      await this.agent.setTrust({
-        reputation: true,
-        cryptoEconomic: true,
-        teeAttestation: false,
-      });
+      this.agent.setTrust(
+        true,  // reputation
+        true,  // cryptoEconomic
+        false  // teeAttestation
+      );
 
       // Set agent wallet (payment address)
       await this.agent.setAgentWallet(
@@ -114,7 +118,18 @@ export class Agent0Registration {
 
       // Register on-chain (IPFS + ERC-8004)
       console.log('📤 Registering agent on-chain...');
-      const registrationFile = await this.agent.registerIPFS();
+      
+      // Use IPFS if configured, otherwise use HTTP URL
+      let registrationFile: any;
+      if (this.sdk.ipfsClient) {
+        // IPFS is configured - use IPFS registration
+        registrationFile = await this.agent.registerIPFS();
+      } else {
+        // No IPFS configured - use HTTP URL instead
+        console.log('ℹ️  IPFS not configured, using HTTP URL for registration...');
+        const agentUri = `${this.config.agentUrl}/agent-info`;
+        registrationFile = await this.agent.registerHTTP(agentUri);
+      }
       
       // Get agent ID
       this.registeredAgentId = this.agent.agentId || null;

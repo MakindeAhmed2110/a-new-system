@@ -8,7 +8,36 @@ import { ReputationQuery, ReputationResponse } from '../types/reputation';
 import { ReputationAggregator } from '../scoring/aggregator';
 import { MerchantExecutor } from '../x402/MerchantExecutor';
 import { Agent0DataFetcher } from '../agent0/data-fetcher';
-import type { PaymentPayload } from 'x402/types';
+import type { PaymentPayload } from 'x402/dist/cjs/types';
+
+/**
+ * Convert BigInt values to strings recursively for JSON serialization
+ */
+function serializeBigInt(obj: any): any {
+  if (obj === null || obj === undefined) {
+    return obj;
+  }
+  
+  if (typeof obj === 'bigint') {
+    return obj.toString();
+  }
+  
+  if (Array.isArray(obj)) {
+    return obj.map(serializeBigInt);
+  }
+  
+  if (typeof obj === 'object') {
+    const result: any = {};
+    for (const key in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        result[key] = serializeBigInt(obj[key]);
+      }
+    }
+    return result;
+  }
+  
+  return obj;
+}
 
 export class ReputationQueryHandler {
   private aggregator: ReputationAggregator;
@@ -101,22 +130,30 @@ export class ReputationQueryHandler {
       if (query.agentId && !query.address) {
         if (!Agent0DataFetcher.isValidAgentId(query.agentId)) {
           return res.status(400).json({
-            success: false,
+          success: false,
             error: 'Invalid Agent0 ID format. Expected format: "chainId:tokenId"',
-          } as ReputationResponse);
-        }
+        } as ReputationResponse);
+      }
 
-        // Fetch agent info from Agent0
-        agent0Info = await this.agent0DataFetcher.getAgentInfo(query.agentId);
-        
-        if (!agent0Info || !agent0Info.walletAddress) {
-          return res.status(404).json({
+        // Fetch agent info from Agent0 (may fail if SDK unavailable)
+        try {
+          agent0Info = await this.agent0DataFetcher.getAgentInfo(query.agentId);
+          
+          if (!agent0Info || !agent0Info.walletAddress) {
+            return res.status(404).json({
+              success: false,
+              error: `Agent not found: ${query.agentId}`,
+            } as ReputationResponse);
+          }
+
+          targetAddress = agent0Info.walletAddress;
+        } catch (agent0Error: any) {
+          // Agent0 SDK unavailable - return helpful error
+          return res.status(503).json({
             success: false,
-            error: `Agent not found: ${query.agentId}`,
+            error: `Agent0 SDK unavailable: ${agent0Error.message}. Please provide wallet address directly instead of agentId.`,
           } as ReputationResponse);
         }
-
-        targetAddress = agent0Info.walletAddress;
       }
 
       // Validate request - need either address or agentId
@@ -146,12 +183,27 @@ export class ReputationQueryHandler {
         query.requesterAddress || query.agentId || verifyResult.payer
       );
 
-      // Settle payment after successful query
-      console.log('💰 Settling payment...');
-      const settlement = await this.merchantExecutor.settlePayment(paymentPayload);
+      // Settle payment after successful query (non-blocking - payment already verified)
+      console.log('💰 Attempting payment settlement...');
+      let settlement;
+      try {
+        settlement = await this.merchantExecutor.settlePayment(paymentPayload);
+        if (!settlement.success) {
+          console.log('ℹ️  Settlement unsuccessful (non-critical - payment already verified)');
+        }
+      } catch (settlementError: any) {
+        // Don't fail the query if settlement fails - payment was already verified
+        console.log(`ℹ️  Settlement skipped (non-critical): ${settlementError.message}`);
+        settlement = {
+          success: false,
+          network: this.merchantExecutor.getPaymentRequirements().network,
+          errorReason: settlementError.message || 'Settlement not configured',
+        };
+      }
 
       // Enhance response with Agent0 info if available
-      const response: any = {
+      // Serialize BigInt values before JSON.stringify
+      const response: any = serializeBigInt({
         success: true,
         score: reputationScore,
         message: `Reputation score calculated for ${targetAddress}`,
@@ -160,8 +212,9 @@ export class ReputationQueryHandler {
           transaction: settlement.transaction,
           network: settlement.network,
           payer: settlement.payer,
+          errorReason: settlement.errorReason,
         },
-      };
+      });
 
       // Add Agent0 information if available
       if (agent0Info || query.agentId) {

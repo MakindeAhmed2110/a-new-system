@@ -15,7 +15,7 @@ import { BlockchainDataSource } from './data-sources/blockchain';
 import { FarcasterDataSource } from './data-sources/farcaster';
 import { LensDataSource } from './data-sources/lens';
 import { MerchantExecutor, type MerchantExecutorOptions } from './x402/MerchantExecutor';
-import type { Network } from 'x402/types';
+import type { Network } from 'x402/dist/cjs/types';
 import { ReputationQueryHandler } from './api/query';
 import { Agent0Registration } from './agent0/registration';
 import { Agent0DataFetcher } from './agent0/data-fetcher';
@@ -40,7 +40,7 @@ for (const envVar of requiredEnvVars) {
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const RPC_URL = process.env.RPC_URL!;
 const PAYMENT_WALLET_ADDRESS = process.env.PAYMENT_WALLET_ADDRESS!;
-const PAYMENT_NETWORK = (process.env.PAYMENT_NETWORK || 'base-sepolia') as Network;
+const PAYMENT_NETWORK = (process.env.PAYMENT_NETWORK || 'base') as Network;
 const QUERY_PRICE = parseFloat(process.env.QUERY_PRICE || '0.01'); // $0.01 per query
 const ACTIVITY_PRICE = parseFloat(process.env.ACTIVITY_PRICE || '0.01'); // $0.01 per activity registration
 const FEEDBACK_PRICE = parseFloat(process.env.FEEDBACK_PRICE || '0.01'); // $0.01 per feedback
@@ -55,7 +55,7 @@ const CHAIN_IDS: Record<string, number> = {
   polygon: 137,
   'polygon-amoy': 80002,
 };
-const AGENT0_CHAIN_ID = CHAIN_IDS[PAYMENT_NETWORK] || 84532; // Default to Base Sepolia
+const AGENT0_CHAIN_ID = CHAIN_IDS[PAYMENT_NETWORK] || 8453; // Default to Base Mainnet
 
 // USDC contract addresses by network
 const USDC_CONTRACTS: Record<string, string> = {
@@ -103,7 +103,7 @@ const queryMerchantOptions: MerchantExecutorOptions = {
   privateKey: process.env.PRIVATE_KEY,
   assetAddress: USDC_CONTRACTS[PAYMENT_NETWORK],
   assetName: 'USDC',
-  chainId: CHAIN_IDS[PAYMENT_NETWORK] || 84532,
+  chainId: CHAIN_IDS[PAYMENT_NETWORK] || 8453,
 };
 
 const queryMerchantExecutor = new MerchantExecutor(queryMerchantOptions);
@@ -121,7 +121,7 @@ const activityMerchantOptions: MerchantExecutorOptions = {
   privateKey: process.env.PRIVATE_KEY,
   assetAddress: USDC_CONTRACTS[PAYMENT_NETWORK],
   assetName: 'USDC',
-  chainId: CHAIN_IDS[PAYMENT_NETWORK] || 84532,
+  chainId: CHAIN_IDS[PAYMENT_NETWORK] || 8453,
 };
 
 const activityMerchantExecutor = new MerchantExecutor(activityMerchantOptions);
@@ -139,7 +139,7 @@ const feedbackMerchantOptions: MerchantExecutorOptions = {
   privateKey: process.env.PRIVATE_KEY,
   assetAddress: USDC_CONTRACTS[PAYMENT_NETWORK],
   assetName: 'USDC',
-  chainId: CHAIN_IDS[PAYMENT_NETWORK] || 84532,
+  chainId: CHAIN_IDS[PAYMENT_NETWORK] || 8453,
 };
 
 const feedbackMerchantExecutor = new MerchantExecutor(feedbackMerchantOptions);
@@ -216,6 +216,20 @@ const queryHandler = new ReputationQueryHandler(
 const app = express();
 app.use(express.json());
 
+// CORS support for external API calls
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x402-payment-payload');
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  
+  next();
+});
+
 // Initialize additional API handlers
 const activityHandler = new ActivityHandler(agent0DataFetcher);
 const feedbackClient = new Agent0FeedbackClient(
@@ -279,9 +293,10 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 });
 
 // Start server
-app.listen(PORT, () => {
+const host = process.env.HOST || '0.0.0.0'; // Railway and other platforms need 0.0.0.0
+app.listen(PORT, host, () => {
   console.log(`
-✅ Server running on http://localhost:${PORT}
+✅ Server running on http://${host}:${PORT}
 
 📡 API Endpoints:
   Query (paid - $${QUERY_PRICE.toFixed(2)}):

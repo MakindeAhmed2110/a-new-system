@@ -1,10 +1,11 @@
 /**
  * Agent0 Data Fetcher
  * Fetches agent information from Agent0 registry/subgraph
+ * Uses local SDK integration
  */
 
-import { SDK } from 'agent0-sdk';
 import { ethers } from 'ethers';
+import type { SDK } from './sdk';
 
 export interface Agent0Info {
   agentId: string;
@@ -44,6 +45,9 @@ export class Agent0DataFetcher {
    */
   private async initializeSDK(): Promise<void> {
     if (this.sdk) return;
+
+    // Import local SDK
+    const { SDK } = await import('./sdk');
 
     this.sdk = new SDK({
       chainId: this.chainId,
@@ -128,7 +132,7 @@ export class Agent0DataFetcher {
       }
 
       const results = await this.sdk.searchAgents(params);
-      return results.items || [];
+      return (results as any).items || results || [];
     } catch (error: any) {
       console.error('Error searching agents:', error.message);
       return [];
