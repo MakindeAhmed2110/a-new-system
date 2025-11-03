@@ -275,7 +275,7 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
   console.error('Unhandled error:', err);
   res.status(500).json({
     error: err.message || 'Internal server error',
-  });
+    });
 });
 
 // Start server
